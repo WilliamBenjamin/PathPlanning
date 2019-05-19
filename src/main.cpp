@@ -7,15 +7,19 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "helpers.h"
 #include "json.hpp"
+#include "spline.h"
 
 // for convenience
 using nlohmann::json;
 using std::string;
 using std::vector;
 
+
+
 int main() {
   uWS::Hub h;
-
+  int lane = 1;
+  double ref_vel = 0.0;
   // Load up map values for waypoint's x,y,s and d normalized normal vectors
   vector<double> map_waypoints_x;
   vector<double> map_waypoints_y;
@@ -50,7 +54,9 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
+  
+
+  h.onMessage([&ref_vel, &lane,&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
                &map_waypoints_dx,&map_waypoints_dy]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
@@ -84,19 +90,195 @@ int main() {
           double end_path_s = j[1]["end_path_s"];
           double end_path_d = j[1]["end_path_d"];
 
+
+          int previous_size = previous_path_x.size();
+     
+          if (previous_size > 0) {
+              car_s = end_path_s;
+            }
           // Sensor Fusion Data, a list of all other cars on the same side 
           //   of the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
+          bool car_just_ahead = false;
+          bool car_to_left = false;
+          bool car_to_right = false;
+
+          // Prediction: Predict the positions of other cars
+          for ( int i = 0; i < sensor_fusion.size(); i++ ) {
+            // Get data about others cars
+            double other_car_vx = sensor_fusion[i][3];
+            double other_car_vy = sensor_fusion[i][4];
+            float other_car_d = sensor_fusion[i][6];
+            double other_car_s = sensor_fusion[i][5];
+
+            // calculate speed of other car
+            double other_car_speed = sqrt(other_car_vx*other_car_vx + 
+                    other_car_vy*other_car_vy);
+
+            // get the lane position of other car based on d val
+            int other_car_lane = -1;
+            if (other_car_d > 0 && other_car_d < 4 ) { // other car in lane 0
+              other_car_lane = 0;
+             
+            } else if ( other_car_d > 4 && other_car_d < 8 ) { // other car in lane 1
+              other_car_lane = 1;
+              
+            } else if ( other_car_d > 8 && other_car_d < 12 ) { // other car is in lane 2
+              other_car_lane = 2;
+              
+            }else
+            {
+              
+              continue;
+            }
+
+            other_car_s += ((double)previous_size*0.02*other_car_speed);
+            // deduce the lane for the other car.
+            if ( other_car_lane == lane ) {
+                  car_just_ahead |= other_car_s > car_s && other_car_s - car_s < 30;
+                } else if ( other_car_lane - lane == -1 ) {
+                 car_to_left |= car_s - 30 < other_car_s && car_s + 30 > other_car_s;
+                } else if ( other_car_lane - lane == 1 ) {
+                 car_to_right |= car_s - 30 < other_car_s && car_s + 30 > other_car_s;
+                }
+
+          }
+
+          if (car_to_right) std::cout << "CAR ON THE RIGHT" << std::endl;
+					if (car_to_left) std::cout << "CAR ON THE LEFT" << std::endl;
+					if (car_just_ahead) std::cout << "CAR JUST AHEAD!" << std::endl;
+
+
+          // Behavior: Chosing the state of the vehicle
+          const double MAX_SPEED = 49.25;
+          const double MAX_ACCELERATION = .224;
+          double speed_difference = 0;
+
+          // simple state machine
+          if ( car_just_ahead ) { // Change lanes if car straight ahead 
+              if ( !car_to_left && lane > 0 ) {
+                lane--;
+                std::cout << "CHANGING LANES" << std::endl; 
+              } else if ( !car_to_right && lane != 2 ){
+                lane++;
+                std::cout << "CHANGING LANES" << std::endl;
+              } else {
+                speed_difference -= MAX_ACCELERATION;
+              }
+            } else { 
+              if ( lane != 1 ) { 
+                if ( ( lane == 0 && !car_to_right ) || ( lane == 2 && !car_to_left ) ) {
+                  lane = 1; // get to middle lane
+                  std::cout << "CHANGING LANES" << std::endl;
+                }
+              }
+              if ( ref_vel < MAX_SPEED ) {
+                speed_difference += MAX_ACCELERATION; // accelerate
+              }
+            }
+
+          // Trajectory prediction
+            vector<double> spline_points_x;
+            vector<double> spline_points_y;
+
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
+
+            if ( previous_size < 2 ) {
+                
+                double prev_car_x = car_x - cos(car_yaw);
+                double prev_car_y = car_y - sin(car_yaw);
+
+                spline_points_x.push_back(prev_car_x);
+                spline_points_x.push_back(car_x);
+
+                spline_points_y.push_back(prev_car_y);
+                spline_points_y.push_back(car_y);
+            } else {
+                
+                ref_x = previous_path_x[previous_size - 1];
+                ref_y = previous_path_y[previous_size - 1];
+
+                double ref_x_prev = previous_path_x[previous_size - 2];
+                double ref_y_prev = previous_path_y[previous_size - 2];
+                ref_yaw = atan2(ref_y-ref_y_prev, ref_x-ref_x_prev);
+
+                spline_points_x.push_back(ref_x_prev);
+                spline_points_x.push_back(ref_x);
+
+                spline_points_y.push_back(ref_y_prev);
+                spline_points_y.push_back(ref_y);
+            }
+
+            vector<double> next_wp0 = getXY(car_s + 30, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            spline_points_x.push_back(next_wp0[0]);
+            spline_points_y.push_back(next_wp0[1]);
+
+
+            vector<double> next_wp1 = getXY(car_s + 60, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            spline_points_x.push_back(next_wp1[0]);
+             spline_points_y.push_back(next_wp1[1]);
+
+
+            vector<double> next_wp2 = getXY(car_s + 90, 2 + 4*lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            spline_points_x.push_back(next_wp2[0]);
+            spline_points_y.push_back(next_wp2[1]);
+
+
+            for ( int i = 0; i < spline_points_x.size(); i++ ) {
+              double shift_x = spline_points_x[i] - ref_x;
+              double shift_y = spline_points_y[i] - ref_y;
+
+              spline_points_x[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
+              spline_points_y[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
+            }
+            // fit a cubic spline using open source library from https://kluge.in-chemnitz.de/opensource/spline/
+            tk::spline spline_trajectory;
+            spline_trajectory.set_points(spline_points_x, spline_points_y);
+
+            
+          	vector<double> next_x_vals;
+          	vector<double> next_y_vals;
+
+            // Insert previous points 
+            for ( int i = 0; i < previous_size; i++ ) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            // compute target 30m away
+            double x_step = 0;
+            double target_x = 30.0;
+            double target_y = spline_trajectory(target_x);
+            double target_dist = sqrt(target_x*target_x + target_y*target_y);
+            for( int i = 1; i < 50 - previous_size; i++ ) {
+              ref_vel += speed_difference;
+              if ( ref_vel > MAX_SPEED ) {
+                ref_vel = MAX_SPEED;
+              } else if ( ref_vel < MAX_ACCELERATION ) {
+                ref_vel = MAX_ACCELERATION;
+              }
+              double number_of_points = target_dist/(0.02*ref_vel/2.24);
+              double delta_x = x_step + target_x/number_of_points;
+              double delta_y = spline_trajectory(delta_x);
+
+              x_step = delta_x;
+
+              double x_ref = delta_x;
+              double y_ref = delta_y;
+
+              delta_x = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
+              delta_y = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+
+              double next_x = ref_x + delta_x;
+              double next_y = ref_y + delta_y;
+
+              next_x_vals.push_back(next_x);
+              next_y_vals.push_back(next_y);
+            }
 
           json msgJson;
-
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
 
 
           msgJson["next_x"] = next_x_vals;

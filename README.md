@@ -140,6 +140,10 @@ that's just a guess.
 One last note here: regardless of the IDE used, every submitted project must
 still be compilable with cmake and make./
 
-## How to write a README
-A well written README file can enhance your project and portfolio.  Develop your abilities to create professional README files by completing [this free course](https://www.udacity.com/course/writing-readmes--ud777).
+## Reflection 
+The path planning for the simulator follows the given steps
+1. Prediction (Lines 107-150): At this step the ego car computes the lane number of the nearby cars which lie within 30 m along the path. 
+2. Behavior Planning (Lines 152-179): Once the location of other cars is known, the ego vehicle computes the lane which it needs to be. The choice of lane is made by a  state machine  which ensures the car continues driving without violating any of the conditions of speed, acceleration and jerk. A simple state machine is used which changes lanes if there is a car ahead and no car is in adjacent lane. In case the ego car cannot change lanes, it tries to slow down to avoid collision. Further if the speed is below max_speed the ego car accelerates.
+3. Trajectory Computation (Lines 180-280): The trajectory of the car is calculated based on the lane choice and speed by fitting a smooth cubic spline on the points. The predicted points are then sent to the simulator. 
+
 
